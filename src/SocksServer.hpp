@@ -4,6 +4,7 @@
 #include <vector>
 #include <mutex>
 
+#include "SocksDef.hpp"
 
 enum class SocksState 
 {
@@ -21,7 +22,7 @@ class SocksTunnelServer
         ~SocksTunnelServer();
 
         int init();
-        int finishHandshack();
+        int finishHandshake();
         int process(std::string& dataIn, std::string& dataOut);
 
         uint32_t getIpDst()
@@ -46,7 +47,7 @@ class SocksTunnelServer
         }
 
     private:
-        int m_serverfd;
+        SocketHandle m_serverfd;
         int m_serverPort;
 
         uint32_t m_ipDst;
@@ -64,7 +65,7 @@ class SocksServer
 
 public:
     SocksServer(int serverPort=1080);
-    ~SocksServer(); 
+    ~SocksServer();
 
     void launch();
     void stop();
@@ -78,7 +79,9 @@ public:
         return m_isLaunched;
     }
 
-    std::vector<std::unique_ptr<SocksTunnelServer>> m_socksTunnelServers;
+    std::size_t tunnelCount();
+    SocksTunnelServer* getTunnel(std::size_t idx);
+    void resetTunnel(std::size_t idx);
 
 private:
     int createListenSocket(struct sockaddr_in &echoclient) ;
@@ -86,11 +89,12 @@ private:
     int handleConnection();
 
     int m_serverPort;
-    int m_listen_sock;
+    SocketHandle m_listen_sock;
 
     bool m_isLaunched;
     bool m_isStoped;
     std::unique_ptr<std::thread> m_socks5Server;
 
-    std::mutex m_mutex;    
+    std::mutex m_mutex;
+    std::vector<std::unique_ptr<SocksTunnelServer>> m_socksTunnelServers;
 };

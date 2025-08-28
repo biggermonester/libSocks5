@@ -1,11 +1,12 @@
 #pragma once
 
+#include "SocksDef.hpp"
 
 class SocksTunnelClient
 {
     public:
         SocksTunnelClient(int id=0);
-        ~SocksTunnelClient(); 
+        ~SocksTunnelClient();
 
         int init(uint32_t ip_dst, uint16_t port);
         int process(const std::string& dataIn, std::string& dataOut);
@@ -17,7 +18,7 @@ class SocksTunnelClient
 
     private:
         int m_id;
-        int m_clientfd;
+        SocketHandle m_clientfd;
 
         std::string m_internalBuffer;
 };
