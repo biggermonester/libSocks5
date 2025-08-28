@@ -101,7 +101,7 @@ struct SOCKS5Response
     uint32_t ip_src;
     uint16_t port_src;
     
-    SOCKS5Response(bool succeded = true) : version(5), cmd(succeded ? RESP_SUCCEDED : RESP_GEN_ERROR), rsv(0), atyp(ATYP_IPV4) { }
+    SOCKS5Response(bool succeded = true) : version(5), cmd(succeded ? static_cast<uint8_t>(Response::Succeded) : static_cast<uint8_t>(Response::GenError)), rsv(0), atyp(static_cast<uint8_t>(AddressType::IPv4)) { }
 } 
 #ifdef __linux__
     __attribute__((packed));
@@ -168,17 +168,7 @@ SocksTunnelServer::SocksTunnelServer(int serverfd, int serverPort, int id)
 }
 
 
-SocksTunnelServer::~SocksTunnelServer()
-{
-    #ifdef __linux__
-        shutdown(m_serverfd, SHUT_RDWR);
-        m_serverfd=-1;
-        close(m_serverfd);    
-    #elif _WIN32
-        closesocket(m_serverfd);    
-        m_serverfd=-1;
-    #endif
-}
+SocksTunnelServer::~SocksTunnelServer() = default;
 
 
 int SocksTunnelServer::init()
@@ -190,76 +180,46 @@ int SocksTunnelServer::init()
     // we are in the TeamServer
 
     MethodIdentificationPacket packet;
-    int read_size = recv_sock(m_serverfd, (char*)&packet, sizeof(MethodIdentificationPacket));
+    int read_size = recv_sock(m_serverfd.get(), (char*)&packet, sizeof(MethodIdentificationPacket));
 
     if(read_size != sizeof(MethodIdentificationPacket) || packet.version != 5)
     {
         std::cout << "[-] Wrong version of proxychain, only proxychain5 is supported." << std::endl;
-        #ifdef __linux__
-            shutdown(m_serverfd, SHUT_RDWR);
-            m_serverfd=-1;
-            close(m_serverfd);    
-        #elif _WIN32
-            closesocket(m_serverfd);    
-            m_serverfd=-1;
-        #endif
+        m_serverfd.reset();
         return 0;
     }
 
-    read_size = recv_sock(m_serverfd, &m_internalBuffer[0], packet.nmethods);
+    read_size = recv_sock(m_serverfd.get(), &m_internalBuffer[0], packet.nmethods);
 
     if(read_size != packet.nmethods)
     {
-        #ifdef __linux__
-            shutdown(m_serverfd, SHUT_RDWR);
-            m_serverfd=-1;
-            close(m_serverfd);    
-        #elif _WIN32
-            closesocket(m_serverfd);    
-            m_serverfd=-1;
-        #endif
+        m_serverfd.reset();
         return 0;
     }
 
-    MethodSelectionPacket methode_response(METHOD_NOTAVAILABLE);
-    for(unsigned i(0); i < packet.nmethods; ++i) 
+    MethodSelectionPacket methode_response(static_cast<uint8_t>(Method::NotAvailable));
+    for(unsigned i(0); i < packet.nmethods; ++i)
     {
-        #ifdef ALLOW_NO_AUTH
-            if(m_internalBuffer[i] == METHOD_NOAUTH)
-                methode_response.method = METHOD_NOAUTH;
-        #endif
-        if(m_internalBuffer[i] == METHOD_AUTH)
-            methode_response.method = METHOD_AUTH;
+        if(ALLOW_NO_AUTH && m_internalBuffer[i] == static_cast<uint8_t>(Method::NoAuth))
+            methode_response.method = static_cast<uint8_t>(Method::NoAuth);
+        if(m_internalBuffer[i] == static_cast<uint8_t>(Method::Auth))
+            methode_response.method = static_cast<uint8_t>(Method::Auth);
     }
 
-    int write_size = send_sock(m_serverfd, (const char*)&methode_response, sizeof(MethodSelectionPacket)) ;
+    int write_size = send_sock(m_serverfd.get(), (const char*)&methode_response, sizeof(MethodSelectionPacket)) ;
 
     // std::cout << "MethodSelectionPacket " << std::to_string(write_size) << std::endl;
 
-    if(write_size != sizeof(MethodSelectionPacket) || methode_response.method == METHOD_NOTAVAILABLE)
+    if(write_size != sizeof(MethodSelectionPacket) || methode_response.method == static_cast<uint8_t>(Method::NotAvailable))
     {
-        #ifdef __linux__
-            shutdown(m_serverfd, SHUT_RDWR);
-            m_serverfd=-1;
-            close(m_serverfd);    
-        #elif _WIN32
-            closesocket(m_serverfd);    
-            m_serverfd=-1;
-        #endif
+        m_serverfd.reset();
         return 0;
     }
 
-    if(methode_response.method == METHOD_AUTH)
-        if(!check_auth(m_serverfd))
+    if(methode_response.method == static_cast<uint8_t>(Method::Auth))
+        if(!check_auth(m_serverfd.get()))
         {
-            #ifdef __linux__
-                shutdown(m_serverfd, SHUT_RDWR);
-                m_serverfd=-1;
-                close(m_serverfd);    
-            #elif _WIN32
-                closesocket(m_serverfd);    
-                m_serverfd=-1;
-            #endif
+            m_serverfd.reset();
             return 0;
         }
 
@@ -267,51 +227,30 @@ int SocksTunnelServer::init()
     std::cout << "[+] HandShake ok" << std::endl;   
 
     SOCKS5RequestHeader header;
-    read_size = recv_sock(m_serverfd, (char*)&header, sizeof(SOCKS5RequestHeader));
+    read_size = recv_sock(m_serverfd.get(), (char*)&header, sizeof(SOCKS5RequestHeader));
 
-    if(read_size != sizeof(SOCKS5RequestHeader) || header.version != 5 || header.cmd != CMD_CONNECT || header.rsv != 0)
+    if(read_size != sizeof(SOCKS5RequestHeader) || header.version != 5 || header.cmd != static_cast<uint8_t>(Command::Connect) || header.rsv != 0)
     {
-        #ifdef __linux__
-            shutdown(m_serverfd, SHUT_RDWR);
-            m_serverfd=-1;
-            close(m_serverfd);    
-        #elif _WIN32
-            closesocket(m_serverfd);    
-            m_serverfd=-1;
-        #endif
+        m_serverfd.reset();
         return 0;
     }
 
     // std::cout << "SOCKS5RequestHeader " << std::to_string(read_size) << std::endl;
 
-    if(header.atyp != ATYP_IPV4)
+    if(header.atyp != static_cast<uint8_t>(AddressType::IPv4))
     {
-        #ifdef __linux__
-            shutdown(m_serverfd, SHUT_RDWR);
-            m_serverfd=-1;
-            close(m_serverfd);    
-        #elif _WIN32
-            closesocket(m_serverfd);    
-            m_serverfd=-1;
-        #endif
+        m_serverfd.reset();
         return 0;
     }
 
     SOCK5IP4RequestBody req;
-    read_size = recv_sock(m_serverfd, (char*)&req, sizeof(SOCK5IP4RequestBody));
+    read_size = recv_sock(m_serverfd.get(), (char*)&req, sizeof(SOCK5IP4RequestBody));
 
     // std::cout << "SOCK5IP4RequestBody " << std::to_string(read_size) << std::endl;
 
     if(read_size != sizeof(SOCK5IP4RequestBody))
     {
-        #ifdef __linux__
-            shutdown(m_serverfd, SHUT_RDWR);
-            m_serverfd=-1;
-            close(m_serverfd);    
-        #elif _WIN32
-            closesocket(m_serverfd);    
-            m_serverfd=-1;
-        #endif
+        m_serverfd.reset();
         return 0;
     }
 
@@ -322,12 +261,12 @@ int SocksTunnelServer::init()
 }
 
 
-int SocksTunnelServer::finishHandshack()
+int SocksTunnelServer::finishHandshake()
 {
     SOCKS5Response response;
     response.ip_src = 0;
     response.port_src = m_serverPort;
-    send_sock(m_serverfd, (const char*)&response, sizeof(SOCKS5Response));
+    send_sock(m_serverfd.get(), (const char*)&response, sizeof(SOCKS5Response));
 
     return 1;
 }
@@ -336,14 +275,14 @@ int SocksTunnelServer::finishHandshack()
 int SocksTunnelServer::process(std::string& dataIn, std::string& dataOut)
 {
     if(dataIn.size()>0)
-        send_sock(m_serverfd, dataIn.data(), dataIn.size());
+        send_sock(m_serverfd.get(), dataIn.data(), dataIn.size());
 
     int bytes_received;
-    bool isDataAvailable;
-
-    isDataAvailable = readAllDataFromSocket(m_serverfd, &m_internalBuffer[0], bytes_received);
-    if(isDataAvailable && bytes_received <= 0)
+    SocketReadStatus status = readAllDataFromSocket(m_serverfd.get(), &m_internalBuffer[0], bytes_received, 10);
+    if(status == SocketReadStatus::Error || status == SocketReadStatus::Disconnected)
         return -1;
+    if(status == SocketReadStatus::Timeout)
+        bytes_received = 0;
 
     dataOut.assign(&m_internalBuffer[0], bytes_received);
 
@@ -384,14 +323,7 @@ void SocksServer::launch()
 void SocksServer::stop()
 {
     m_isStoped=true;
-    #ifdef __linux__
-        shutdown(m_listen_sock, SHUT_RDWR);
-        m_listen_sock=-1;
-        close(m_listen_sock);    
-    #elif _WIN32
-        closesocket(m_listen_sock);    
-        m_listen_sock=-1;
-    #endif
+    m_listen_sock.reset();
 
     if(m_socks5Server)
     {
@@ -461,36 +393,32 @@ int SocksServer::createServerSocket(struct sockaddr_in &echoclient)
 int SocksServer::handleConnection()
 {
     struct sockaddr_in echoclient;
-    m_listen_sock = createServerSocket(echoclient);
-    
-    if(m_listen_sock == -1) 
+    m_listen_sock.reset(createServerSocket(echoclient));
+
+    if(m_listen_sock.get() == -1)
     {
         std::cout << "[-] Failed to create server\n";
         return -1;
     }
 
-    #ifdef __linux__
-        signal(SIGPIPE, sig_handler);  
-    #elif _WIN32  
-    #endif
-
+#ifdef __linux__
+    signal(SIGPIPE, sig_handler);
+#elif _WIN32
+#endif
 
     m_isStoped = false;
     m_isLaunched = true;
     int idSocksTunnelServer=0;
-    while(!m_isStoped) 
+    while(!m_isStoped)
     {
         int clientlen = sizeof(echoclient);
         int clientsock;
-        #ifdef __linux__
-        if ((clientsock = accept(m_listen_sock, (struct sockaddr *) &echoclient, (uint*)&clientlen)) > 0) 
-        #elif _WIN32
-        if ((clientsock = accept(m_listen_sock, (struct sockaddr *) &echoclient, &clientlen)) > 0) 
-        #endif 
+#ifdef __linux__
+        if ((clientsock = accept(m_listen_sock.get(), (struct sockaddr *) &echoclient, (uint*)&clientlen)) > 0)
+#elif _WIN32
+        if ((clientsock = accept(m_listen_sock.get(), (struct sockaddr *) &echoclient, &clientlen)) > 0)
+#endif
         {
-            // 
-            // mode indirect
-            //
             std::unique_ptr<SocksTunnelServer> socksTunnelServer = std::make_unique<SocksTunnelServer>(clientsock, m_serverPort, idSocksTunnelServer);
             int initResult = socksTunnelServer->init();
             if(initResult)
@@ -498,24 +426,13 @@ int SocksServer::handleConnection()
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_socksTunnelServers.push_back(std::move(socksTunnelServer));
             }
-            else
-            {
-                // printf("SocksTunnelServer init failed\n");
-            }
             idSocksTunnelServer++;
         }
     }
 
     std::cout << "[+] handleConnection stoped\n";
 
-    #ifdef __linux__
-        shutdown(m_listen_sock, SHUT_RDWR);
-        m_listen_sock=-1;
-        close(m_listen_sock);    
-    #elif _WIN32
-        closesocket(m_listen_sock);    
-        m_listen_sock=-1;
-    #endif
+    m_listen_sock.reset();
 
     return 1;
 }
@@ -527,4 +444,25 @@ void SocksServer::cleanTunnel()
     m_socksTunnelServers.erase(std::remove_if(m_socksTunnelServers.begin(), m_socksTunnelServers.end(),
                              [](const std::unique_ptr<SocksTunnelServer>& ptr) { return ptr == nullptr; }),
               m_socksTunnelServers.end());
+}
+
+std::size_t SocksServer::tunnelCount()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_socksTunnelServers.size();
+}
+
+SocksTunnelServer* SocksServer::getTunnel(std::size_t idx)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if(idx >= m_socksTunnelServers.size())
+        return nullptr;
+    return m_socksTunnelServers[idx].get();
+}
+
+void SocksServer::resetTunnel(std::size_t idx)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if(idx < m_socksTunnelServers.size())
+        m_socksTunnelServers[idx].reset();
 }

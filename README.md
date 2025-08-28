@@ -1,24 +1,25 @@
-# libSocks5 Server
+# libSocks5
 
-The library implement a simple socks5 server with the particularity that the actual Sock5 Server and the targeted host where SockerTunnelClient run can be splited. Thus the Socks traffic can be encapsulated within another protocol like TCP/HTTP/SMB...
+A lightweight C++ SOCKS5 server and tunnel client for pivoting traffic through an intermediate host. The tunnel server accepts SOCKS5 connections, negotiates authentication and forwards data to a remote `SocksTunnelClient` running closer to the target network.
 
-proxychains ... <- tcp -> SocksServer <- http/tcp/smb -> SocksTunnelClient <- tcp -> target ip/port
-
+## Features
+- SOCKS5 CONNECT support with optional username/password authentication
+- Split architecture: public SOCKS server and tunnel client can run on different machines
+- Cross-platform build (Linux/Windows) using CMake
 
 ## Build
-
-```
-mkdir build
-cd build
+```bash
+mkdir build && cd build
 cmake ..
 make -j4
 ```
 
-Run SocksServer localy:
-
-```
+## Usage
+1. Launch the test server:
+```bash
 ./TestsSocksServer
-
-proxychains nmap -sT -sC -sV 127.0.0.1 -p 1080
-proxychains curl http://127.0.0.1:8080/test
 ```
+2. Point a SOCKS-aware client at `localhost:1080` (e.g., `proxychains curl http://example.com`).
+
+## Notes
+This project is a proof-of-concept; error handling and robustness are limited. Run behind a firewall and avoid exposing it to untrusted networks.

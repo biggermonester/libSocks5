@@ -2,6 +2,7 @@
 #include <string>
 #include <chrono>
 #include <thread>
+#include <cstdint>
 
 #include "SocksServer.hpp"
 #include "SocksTunnelClient.hpp"
@@ -12,28 +13,30 @@ int main(int argc, char *argv[])
     SocksServer socksServer(1080);
     socksServer.launch();
 
-    while(1)
+    int iterations = 0;
+    while(iterations < 50)
     {
-        for(int i=0; i<socksServer.m_socksTunnelServers.size(); i++)
+        for(std::size_t i=0; i<socksServer.tunnelCount(); i++)
         {
-            std::cout << "main loop idx " << std::to_string(i) << std::endl;
-            if(socksServer.m_socksTunnelServers[i]!=nullptr)
+            std::cout << "main loop idx " << i << std::endl;
+            SocksTunnelServer* tunnel = socksServer.getTunnel(i);
+            if(tunnel)
             {
-                std::cout << "GO " << std::to_string(i) << std::endl;
+                std::cout << "GO " << i << std::endl;
 
-                uint32_t ip = socksServer.m_socksTunnelServers[i]->getIpDst();
-                uint16_t port = socksServer.m_socksTunnelServers[i]->getPort();
+                uint32_t ip = tunnel->getIpDst();
+                uint16_t port = tunnel->getPort();
 
                 SocksTunnelClient socksTunnelClient;
                 socksTunnelClient.init(ip, port);
 
-                socksServer.m_socksTunnelServers[i]->finishHandshack();
+                tunnel->finishHandshake();
 
                 std::string dataIn;
                 std::string dataOut;
-                while(1)
+                while(true)
                 {
-                    int res = socksServer.m_socksTunnelServers[i]->process(dataIn, dataOut);
+                    int res = tunnel->process(dataIn, dataOut);
                     if(res<=0)
                         break;
 
@@ -42,12 +45,13 @@ int main(int argc, char *argv[])
                         break;
                 }
 
-                std::cout << "End    " << std::to_string(i) << std::endl;
+                std::cout << "End    " << i << std::endl;
 
-                socksServer.m_socksTunnelServers[i].reset(nullptr);
+                socksServer.resetTunnel(i);
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        iterations++;
     }
 
     return 0;
