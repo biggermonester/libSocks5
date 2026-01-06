@@ -277,14 +277,9 @@ int SocksTunnelServer::process(std::string& dataIn, std::string& dataOut)
     if(dataIn.size()>0)
         send_sock(m_serverfd.get(), dataIn.data(), dataIn.size());
 
-    int bytes_received;
-    SocketReadStatus status = readAllDataFromSocket(m_serverfd.get(), &m_internalBuffer[0], bytes_received, 10);
-    if(status == SocketReadStatus::Error || status == SocketReadStatus::Disconnected)
+    DrainStatus status = readAllAvailableNow_(m_serverfd.get(), dataOut, 0);
+    if(status == DrainStatus::Error || status == DrainStatus::Disconnected)
         return -1;
-    if(status == SocketReadStatus::Timeout)
-        bytes_received = 0;
-
-    dataOut.assign(&m_internalBuffer[0], bytes_received);
 
     return 1;
 }

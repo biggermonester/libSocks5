@@ -134,39 +134,141 @@ inline int send_sock(int sock, const char *buffer, uint32_t size)
     return index;
 }
 
+// Read all data that is currently available *now* (best-effort), without changing blocking mode.
+// - Waits up to timeout_ms for the socket to become readable.
+// - Then drains using non-blocking recv *per call*:
+//    - Linux: uses MSG_DONTWAIT (does not toggle socket flags)
+//    - Windows: uses recv(..., MSG_PEEK) + ioctlsocket(FIONREAD) to avoid blocking
+//
+// Notes:
+// - This is "drain available bytes", NOT "read a full message".
+// - Uses a max_bytes cap to prevent unbounded memory growth.
 
-enum class SocketReadStatus
+#include <string>
+#include <algorithm>
+
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #pragma comment(lib, "Ws2_32.lib")
+  using sock_t = SOCKET;
+#else
+  #include <poll.h>
+  #include <sys/socket.h>
+  #include <errno.h>
+  using sock_t = int;
+#endif
+
+enum class DrainStatus { ReadSome, NoData, Disconnected, Error, Truncated };
+
+inline DrainStatus readAllAvailableNow_(sock_t s, std::string& out, int timeout_ms = 0, size_t max_bytes = 262144)
 {
-    Timeout,
-    Success,
-    Disconnected,
-    Error
-};
+    out.clear();
+    if (max_bytes == 0)
+        return DrainStatus::NoData;
 
-inline SocketReadStatus readAllDataFromSocket(int sockfd, char* buffer, int &bytes_received, int timeout_ms)
-{
-    fd_set readfds;
-    bytes_received = 0;
-    FD_ZERO(&readfds);
-    FD_SET(sockfd, &readfds);
+    // Wait for readability (poll/WSAPoll). This does not change socket mode.
+#ifdef _WIN32
+    WSAPOLLFD pfd{};
+    pfd.fd = s;
+    pfd.events = POLLRDNORM; // readable
+    int prc = WSAPoll(&pfd, 1, timeout_ms);
+    if (prc == SOCKET_ERROR)
+        return DrainStatus::Error;
+    if (prc == 0)
+        return DrainStatus::NoData;
+#else
+    pollfd pfd{};
+    pfd.fd = s;
+    pfd.events = POLLIN;
+    int prc;
+    do {
+        prc = poll(&pfd, 1, timeout_ms);
+    } while (prc < 0 && errno == EINTR);
+    if (prc < 0)
+        return DrainStatus::Error;
+    if (prc == 0)
+        return DrainStatus::NoData;
+#endif
 
-    struct timeval timeout;
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    DrainStatus status = DrainStatus::NoData;
+    char buf[4096];
 
-    int activity = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
-    if (activity < 0)
-        return SocketReadStatus::Error;
-    if (activity == 0)
-        return SocketReadStatus::Timeout;
-    if (FD_ISSET(sockfd, &readfds))
+#ifdef _WIN32
+    // Windows: without switching to non-blocking, we must avoid a recv() that could block.
+    // Strategy:
+    //  1) Query bytes available with FIONREAD.
+    //  2) Read exactly that many bytes (bounded by max_bytes) in chunks.
+    u_long avail = 0;
+    if (ioctlsocket(s, FIONREAD, &avail) != 0)
+        return DrainStatus::Error;
+
+    if (avail == 0)
     {
-        bytes_received = recv(sockfd, buffer, BUF_SIZE, 0);
-        if (bytes_received > 0)
-            return SocketReadStatus::Success;
-        if (bytes_received == 0)
-            return SocketReadStatus::Disconnected;
-        return SocketReadStatus::Error;
+        // Either no data, or a close is pending. Probe with MSG_PEEK (safe after poll).
+        char tmp;
+        int n = recv(s, &tmp, 1, MSG_PEEK);
+        if (n == 0)  return DrainStatus::Disconnected;
+        if (n < 0)   return DrainStatus::Error;
+        return DrainStatus::NoData;
     }
-    return SocketReadStatus::Timeout;
+
+    size_t to_read = std::min<size_t>((size_t)avail, max_bytes);
+    out.reserve(std::min<size_t>(to_read, 64 * 1024));
+
+    size_t read_total = 0;
+    while (read_total < to_read)
+    {
+        int want = (int)std::min<size_t>(sizeof(buf), to_read - read_total);
+        int n = recv(s, buf, want, 0);
+        if (n > 0)
+        {
+            out.append(buf, n);
+            read_total += (size_t)n;
+            status = DrainStatus::ReadSome;
+            continue;
+        }
+        if (n == 0)
+            return (status == DrainStatus::ReadSome) ? DrainStatus::ReadSome : DrainStatus::Disconnected;
+
+        return (status == DrainStatus::ReadSome) ? DrainStatus::ReadSome : DrainStatus::Error;
+    }
+
+    if ((size_t)avail > max_bytes)
+        return DrainStatus::Truncated;
+
+    return status;
+
+#else
+    // Linux: MSG_DONTWAIT makes this recv call non-blocking without toggling flags.
+    out.reserve(std::min<size_t>(max_bytes, 64 * 1024));
+
+    while (out.size() < max_bytes)
+    {
+        size_t room = max_bytes - out.size();
+        int want = (int)std::min<size_t>(room, sizeof(buf));
+
+        ssize_t n = recv(s, buf, want, MSG_DONTWAIT);
+        if (n > 0)
+        {
+            out.append(buf, (size_t)n);
+            status = DrainStatus::ReadSome;
+            continue;
+        }
+        if (n == 0)
+            return (status == DrainStatus::ReadSome) ? DrainStatus::ReadSome : DrainStatus::Disconnected;
+
+        if (errno == EINTR)
+            continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+
+        return (status == DrainStatus::ReadSome) ? DrainStatus::ReadSome : DrainStatus::Error;
+    }
+
+    if (out.size() >= max_bytes)
+        return DrainStatus::Truncated;
+
+    return status;
+#endif
 }
