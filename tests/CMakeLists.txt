@@ -6,3 +6,5 @@ if(WIN32)
 else()
 	target_link_libraries(TestsSocksServer SocksServer pthread)
 endif()
+
+# Manual harness: opens a SOCKS listener and loops for about 10 seconds.
