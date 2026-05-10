@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "SocksDef.hpp"
 
 class SocksTunnelClient
@@ -9,6 +11,7 @@ class SocksTunnelClient
         ~SocksTunnelClient();
 
         int init(uint32_t ip_dst, uint16_t port);
+        int initHostname(const std::string& hostname, uint16_t port);
         int process(const std::string& dataIn, std::string& dataOut);
 
         int getId()

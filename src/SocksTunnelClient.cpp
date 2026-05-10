@@ -11,7 +11,6 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
-#include <iostream>
 #include <string>
 #include <sstream>
 
@@ -34,50 +33,58 @@ std::string int_to_str(uint32_t ip)
     return oss.str();
 }
 
-
-int connect_to_host(uint32_t ip, uint16_t port)
+void close_socket(int sock)
 {
-    struct sockaddr_in serv_addr;
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
+#ifdef __linux__
+    close(sock);
+#elif _WIN32
+    closesocket(sock);
+#endif
+}
+
+
+int connect_to_target(const std::string& host, uint16_t port)
+{
+    if(host.empty() || port == 0)
     {
         return -1;
     }
-
-    std::string ip_string = int_to_str(ip);
 
     struct addrinfo hints, *res = nullptr;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
-    if (getaddrinfo(ip_string.c_str(), nullptr, &hints, &res) != 0)
+    const std::string port_string = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_string.c_str(), &hints, &res) != 0)
     {
-#ifdef __linux__
-        close(sockfd);
-#elif _WIN32
-        closesocket(sockfd);
-#endif
         return -1;
     }
 
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
-    serv_addr.sin_port = htons(port);
+    int connected = -1;
+    for (addrinfo* current = res; current != nullptr; current = current->ai_next)
+    {
+        int sockfd = socket(current->ai_family, current->ai_socktype, current->ai_protocol);
+        if (sockfd < 0)
+            continue;
+
+        if (connect(sockfd, current->ai_addr, static_cast<int>(current->ai_addrlen)) == 0)
+        {
+            connected = sockfd;
+            break;
+        }
+
+        close_socket(sockfd);
+    }
+
     freeaddrinfo(res);
+    return connected;
+}
 
-    if (connect(sockfd, (const sockaddr*)&serv_addr, sizeof(serv_addr)) != 0)
-    {
-#ifdef __linux__
-        close(sockfd);
-#elif _WIN32
-        closesocket(sockfd);
-#endif
-        return -1;
-    }
 
-    return sockfd;
+int connect_to_host(uint32_t ip, uint16_t port)
+{
+    return connect_to_target(int_to_str(ip), port);
 }
 
 
@@ -108,12 +115,30 @@ SocksTunnelClient::~SocksTunnelClient()
 int SocksTunnelClient::init(uint32_t ip_dst, uint16_t port)
 {
 #ifdef __linux__
-    signal(SIGPIPE, sig_handler); 
+    signal(SIGPIPE, sig_handler);
 #elif _WIN32
-     
+
 #endif
 
     m_clientfd.reset(connect_to_host(ip_dst, ntohs(port)));
+    if(m_clientfd.get() == -1)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+
+int SocksTunnelClient::initHostname(const std::string& hostname, uint16_t port)
+{
+#ifdef __linux__
+    signal(SIGPIPE, sig_handler);
+#elif _WIN32
+
+#endif
+
+    m_clientfd.reset(connect_to_target(hostname, ntohs(port)));
     if(m_clientfd.get() == -1)
     {
         return 0;

@@ -18,6 +18,7 @@
 #endif
 
 #include "SocksServer.hpp"
+#include "SocksTunnelClient.hpp"
 
 namespace
 {
@@ -101,6 +102,41 @@ int reserveLocalPort()
     closeSocket(sock);
     return port;
 }
+
+class LocalTcpListener
+{
+public:
+    LocalTcpListener()
+        : sock(static_cast<int>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)))
+    {
+        require(sock >= 0, "listener socket failed");
+
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        require(::bind(sock, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0, "listener bind failed");
+        require(::listen(sock, 8) == 0, "listener listen failed");
+
+#ifdef _WIN32
+        int addressSize = sizeof(address);
+#else
+        socklen_t addressSize = sizeof(address);
+#endif
+        require(::getsockname(sock, reinterpret_cast<sockaddr*>(&address), &addressSize) == 0, "listener getsockname failed");
+        port = ntohs(address.sin_port);
+    }
+
+    ~LocalTcpListener()
+    {
+        closeSocket(sock);
+    }
+
+    int port = 0;
+
+private:
+    int sock = -1;
+};
 
 int connectLocal(int port)
 {
@@ -253,7 +289,7 @@ void testIpv4ConnectQueuesTunnelAndSuccessReply()
     closeSocket(client);
 }
 
-void testDomainNameConnectReturnsExplicitUnsupportedAddress()
+void testDomainNameConnectQueuesTunnelAndSuccessReply()
 {
     RunningSocksServer running;
     const int client = connectAndNegotiateNoAuth(running);
@@ -262,10 +298,54 @@ void testDomainNameConnectReturnsExplicitUnsupportedAddress()
     request += bytes({0x00, 0x50});
     sendAll(client, request);
 
+    require(waitFor([&running] { return running.server.tunnelCount() == 1; }), "domain CONNECT did not queue a tunnel");
+    SocksTunnelServer* tunnel = running.server.getTunnel(0);
+    require(tunnel != nullptr, "domain tunnel is null");
+    require(tunnel->getAddressType() == AddressType::DName, "domain tunnel address type mismatch");
+    require(tunnel->getDestinationHost() == "example.com", "domain tunnel hostname mismatch");
+    require(tunnel->getPort() == htons(80), "domain destination port mismatch");
+
+    tunnel->finishHandshake();
     const SocksReply reply = recvReply(client);
-    require(reply.version == 5, "domain reject reply version mismatch");
-    require(reply.code == static_cast<uint8_t>(Response::AddressTypeNotSupported), "domain reject code mismatch");
-    require(running.server.tunnelCount() == 0, "domain CONNECT should not queue a tunnel");
+    require(reply.version == 5, "domain success reply version mismatch");
+    require(reply.code == static_cast<uint8_t>(Response::Succeeded), "domain success reply code mismatch");
+    closeSocket(client);
+}
+
+void testDomainNameConnectCanReturnBeaconResolutionFailure()
+{
+    RunningSocksServer running;
+    const int client = connectAndNegotiateNoAuth(running);
+    std::string request = bytes({0x05, 0x01, 0x00, 0x03, 11});
+    request += "missing.tld";
+    request += bytes({0x00, 0x50});
+    sendAll(client, request);
+
+    require(waitFor([&running] { return running.server.tunnelCount() == 1; }), "domain failure tunnel was not queued");
+    SocksTunnelServer* tunnel = running.server.getTunnel(0);
+    require(tunnel != nullptr, "domain failure tunnel is null");
+
+    tunnel->failHandshake(Response::HostUnreachable);
+    const SocksReply reply = recvReply(client);
+    require(reply.version == 5, "domain failure reply version mismatch");
+    require(reply.code == static_cast<uint8_t>(Response::HostUnreachable), "domain failure reply code mismatch");
+    closeSocket(client);
+}
+
+void testIpv6ConnectReturnsExplicitUnsupportedAddress()
+{
+    RunningSocksServer running;
+    const int client = connectAndNegotiateNoAuth(running);
+    sendAll(client, bytes({
+        0x05, 0x01, 0x00, 0x04,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        0x00, 0x50
+    }));
+
+    const SocksReply reply = recvReply(client);
+    require(reply.version == 5, "IPv6 reject reply version mismatch");
+    require(reply.code == static_cast<uint8_t>(Response::AddressTypeNotSupported), "IPv6 reject code mismatch");
+    require(running.server.tunnelCount() == 0, "IPv6 CONNECT should not queue a tunnel");
     closeSocket(client);
 }
 
@@ -281,6 +361,13 @@ void testUnsupportedCommandReturnsExplicitFailure()
     require(running.server.tunnelCount() == 0, "unsupported command should not queue a tunnel");
     closeSocket(client);
 }
+
+void testTunnelClientResolvesHostnameLocally()
+{
+    LocalTcpListener listener;
+    SocksTunnelClient client;
+    require(client.initHostname("localhost", htons(static_cast<uint16_t>(listener.port))) == 1, "hostname connect should resolve and connect");
+}
 } // namespace
 
 int main()
@@ -288,7 +375,10 @@ int main()
     SocketRuntime runtime;
     testNoAcceptableMethod();
     testIpv4ConnectQueuesTunnelAndSuccessReply();
-    testDomainNameConnectReturnsExplicitUnsupportedAddress();
+    testDomainNameConnectQueuesTunnelAndSuccessReply();
+    testDomainNameConnectCanReturnBeaconResolutionFailure();
+    testIpv6ConnectReturnsExplicitUnsupportedAddress();
     testUnsupportedCommandReturnsExplicitFailure();
+    testTunnelClientResolvesHostnameLocally();
     return 0;
 }

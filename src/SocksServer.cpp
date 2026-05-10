@@ -224,6 +224,9 @@ bool check_auth(int sock)
 SocksTunnelServer::SocksTunnelServer(int serverfd, int serverPort, int id)
 : m_serverfd(serverfd)
 , m_serverPort(serverPort)
+, m_addressType(AddressType::IPv4)
+, m_ipDst(0)
+, m_port(0)
 , m_state(SocksState::INIT)
 , m_id(id)
 {
@@ -301,40 +304,67 @@ int SocksTunnelServer::init()
         return 0;
     }
 
-    if(header.atyp != static_cast<uint8_t>(AddressType::IPv4))
+    if(header.atyp == static_cast<uint8_t>(AddressType::IPv4))
     {
-        if(header.atyp == static_cast<uint8_t>(AddressType::DName))
+        SOCK5IP4RequestBody req;
+        read_size = recv_sock_timeout(m_serverfd.get(), (char*)&req, sizeof(SOCK5IP4RequestBody), SOCKS_HANDSHAKE_TIMEOUT_MS);
+
+        if(read_size != sizeof(SOCK5IP4RequestBody))
         {
-            SOCK5DNameRequestBody body;
-            if(recv_sock_timeout(m_serverfd.get(), (char*)&body, sizeof(SOCK5DNameRequestBody), SOCKS_HANDSHAKE_TIMEOUT_MS) == sizeof(SOCK5DNameRequestBody))
-                recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], body.length, SOCKS_HANDSHAKE_TIMEOUT_MS);
-            uint8_t ignoredPort[2];
-            recv_sock_timeout(m_serverfd.get(), reinterpret_cast<char*>(ignoredPort), sizeof(ignoredPort), SOCKS_HANDSHAKE_TIMEOUT_MS);
+            m_serverfd.reset();
+            return 0;
         }
-        else if(header.atyp == static_cast<uint8_t>(AddressType::IPv6))
-        {
-            recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], 16, SOCKS_HANDSHAKE_TIMEOUT_MS);
-            uint8_t ignoredPort[2];
-            recv_sock_timeout(m_serverfd.get(), reinterpret_cast<char*>(ignoredPort), sizeof(ignoredPort), SOCKS_HANDSHAKE_TIMEOUT_MS);
-        }
-        send_socks_response(m_serverfd.get(), Response::AddressTypeNotSupported);
-        m_serverfd.reset();
-        return 0;
+
+        m_addressType = AddressType::IPv4;
+        m_ipDst = req.ip_dst;
+        m_destinationHost.clear();
+        m_port = req.port;
+        return 1;
     }
 
-    SOCK5IP4RequestBody req;
-    read_size = recv_sock_timeout(m_serverfd.get(), (char*)&req, sizeof(SOCK5IP4RequestBody), SOCKS_HANDSHAKE_TIMEOUT_MS);
-
-    if(read_size != sizeof(SOCK5IP4RequestBody))
+    if(header.atyp == static_cast<uint8_t>(AddressType::DName))
     {
-        m_serverfd.reset();
-        return 0;
+        SOCK5DNameRequestBody body;
+        read_size = recv_sock_timeout(m_serverfd.get(), (char*)&body, sizeof(SOCK5DNameRequestBody), SOCKS_HANDSHAKE_TIMEOUT_MS);
+        if(read_size != sizeof(SOCK5DNameRequestBody) || body.length == 0 || body.length > m_internalBuffer.size())
+        {
+            send_socks_response(m_serverfd.get(), Response::GenError);
+            m_serverfd.reset();
+            return 0;
+        }
+
+        read_size = recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], body.length, SOCKS_HANDSHAKE_TIMEOUT_MS);
+        if(read_size != body.length)
+        {
+            m_serverfd.reset();
+            return 0;
+        }
+
+        uint16_t port = 0;
+        read_size = recv_sock_timeout(m_serverfd.get(), reinterpret_cast<char*>(&port), sizeof(port), SOCKS_HANDSHAKE_TIMEOUT_MS);
+        if(read_size != sizeof(port))
+        {
+            m_serverfd.reset();
+            return 0;
+        }
+
+        m_addressType = AddressType::DName;
+        m_ipDst = 0;
+        m_destinationHost.assign(m_internalBuffer.data(), body.length);
+        m_port = port;
+        return 1;
     }
 
-    m_ipDst = req.ip_dst;
-    m_port = req.port;
+    if(header.atyp == static_cast<uint8_t>(AddressType::IPv6))
+    {
+        recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], 16, SOCKS_HANDSHAKE_TIMEOUT_MS);
+        uint8_t ignoredPort[2];
+        recv_sock_timeout(m_serverfd.get(), reinterpret_cast<char*>(ignoredPort), sizeof(ignoredPort), SOCKS_HANDSHAKE_TIMEOUT_MS);
+    }
 
-    return 1;
+    send_socks_response(m_serverfd.get(), Response::AddressTypeNotSupported);
+    m_serverfd.reset();
+    return 0;
 }
 
 
@@ -342,6 +372,13 @@ int SocksTunnelServer::finishHandshake()
 {
     send_socks_response(m_serverfd.get(), Response::Succeeded, static_cast<uint16_t>(m_serverPort));
 
+    return 1;
+}
+
+
+int SocksTunnelServer::failHandshake(Response response)
+{
+    send_socks_response(m_serverfd.get(), response);
     return 1;
 }
 

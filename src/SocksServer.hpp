@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 #include <thread>
 #include <vector>
 #include <mutex>
@@ -24,11 +25,20 @@ class SocksTunnelServer
 
         int init();
         int finishHandshake();
+        int failHandshake(Response response);
         int process(std::string& dataIn, std::string& dataOut);
 
         uint32_t getIpDst()
         {
             return m_ipDst;
+        }
+        AddressType getAddressType()
+        {
+            return m_addressType;
+        }
+        const std::string& getDestinationHost()
+        {
+            return m_destinationHost;
         }
         uint16_t getPort()
         {
@@ -51,7 +61,9 @@ class SocksTunnelServer
         SocketHandle m_serverfd;
         int m_serverPort;
 
+        AddressType m_addressType;
         uint32_t m_ipDst;
+        std::string m_destinationHost;
         uint16_t m_port;
 
         SocksState m_state;
