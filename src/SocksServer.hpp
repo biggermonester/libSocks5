@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <thread>
 #include <vector>
 #include <mutex>
@@ -91,8 +92,8 @@ private:
     int m_serverPort;
     SocketHandle m_listen_sock;
 
-    bool m_isLaunched;
-    bool m_isStoped;
+    std::atomic_bool m_isLaunched;
+    std::atomic_bool m_isStoped;
     std::unique_ptr<std::thread> m_socks5Server;
 
     std::mutex m_mutex;

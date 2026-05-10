@@ -12,7 +12,6 @@
 
 #include <cstdint>
 #include <cstddef>
-#include <iostream>
 
 static constexpr std::size_t BUF_SIZE = 2048;
 
@@ -44,8 +43,16 @@ enum class Method : uint8_t
 // Responses
 enum class Response : uint8_t
 {
-    Succeded = 0,
-    GenError = 1
+    Succeeded = 0,
+    Succeded = Succeeded,
+    GenError = 1,
+    ConnectionNotAllowed = 2,
+    NetworkUnreachable = 3,
+    HostUnreachable = 4,
+    ConnectionRefused = 5,
+    TtlExpired = 6,
+    CommandNotSupported = 7,
+    AddressTypeNotSupported = 8
 };
 
 // windows compatibility
@@ -64,7 +71,7 @@ typedef unsigned __int64    ssize_t;
 // handle sig_pipe that can crash the app otherwise
 inline void sig_handler(int signum)
 {
-    std::cerr << "signal(" << signum << ")" << std::endl;
+    (void)signum;
 }
 
 class SocketHandle

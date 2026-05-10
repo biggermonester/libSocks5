@@ -11,7 +11,6 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
-#include <iostream>
 #include <string>
 #include <algorithm>
 
@@ -101,7 +100,15 @@ struct SOCKS5Response
     uint32_t ip_src;
     uint16_t port_src;
     
-    SOCKS5Response(bool succeded = true) : version(5), cmd(succeded ? static_cast<uint8_t>(Response::Succeded) : static_cast<uint8_t>(Response::GenError)), rsv(0), atyp(static_cast<uint8_t>(AddressType::IPv4)) { }
+    SOCKS5Response(Response response = Response::Succeeded)
+        : version(5),
+          cmd(static_cast<uint8_t>(response)),
+          rsv(0),
+          atyp(static_cast<uint8_t>(AddressType::IPv4)),
+          ip_src(0),
+          port_src(0)
+    {
+    }
 } 
 #ifdef __linux__
     __attribute__((packed));
@@ -118,14 +125,63 @@ struct SOCKS5Response
 
 using namespace std;
 
+namespace
+{
+constexpr int SOCKS_HANDSHAKE_TIMEOUT_MS = 5000;
+
+int recv_sock_timeout(int sock, char* buffer, uint32_t size, int timeoutMs)
+{
+    int index = 0;
+    while(size)
+    {
+        fd_set readFds;
+        FD_ZERO(&readFds);
+        FD_SET(sock, &readFds);
+
+        timeval timeout{};
+        timeout.tv_sec = timeoutMs / 1000;
+        timeout.tv_usec = (timeoutMs % 1000) * 1000;
+
+#ifdef _WIN32
+        const int ready = select(0, &readFds, nullptr, nullptr, &timeout);
+#else
+        const int ready = select(sock + 1, &readFds, nullptr, nullptr, &timeout);
+#endif
+        if(ready <= 0)
+            return -1;
+
+        const int ret = recv(sock, &buffer[index], size, 0);
+        if(ret <= 0)
+            return (!ret) ? index : -1;
+
+        index += ret;
+        size -= ret;
+    }
+    return index;
+}
+
+bool send_socks_response(int sock, Response code, uint16_t port = 0)
+{
+    SOCKS5Response response(code);
+    response.port_src = htons(port);
+    return send_sock(sock, reinterpret_cast<const char*>(&response), sizeof(SOCKS5Response)) == sizeof(SOCKS5Response);
+}
+
+bool send_auth_response(int sock, uint8_t status)
+{
+    uint8_t buffer[2] = {1, status};
+    return send_sock(sock, reinterpret_cast<const char*>(buffer), sizeof(buffer)) == sizeof(buffer);
+}
+} // namespace
+
 
 int read_variable_string(int sock, uint8_t *buffer, uint8_t max_sz) 
 {
-    if(recv_sock(sock, (char*)buffer, 1) != 1 || buffer[0] > max_sz)
+    if(recv_sock_timeout(sock, (char*)buffer, 1, SOCKS_HANDSHAKE_TIMEOUT_MS) != 1 || buffer[0] > max_sz)
         return false;
 
     uint8_t sz = buffer[0];
-    if(recv_sock(sock, (char*)buffer, sz) != sz)
+    if(recv_sock_timeout(sock, (char*)buffer, sz, SOCKS_HANDSHAKE_TIMEOUT_MS) != sz)
         return -1;
 
     return sz;
@@ -135,23 +191,30 @@ int read_variable_string(int sock, uint8_t *buffer, uint8_t max_sz)
 bool check_auth(int sock)
 {
     uint8_t buffer[128];
-    if(recv_sock(sock, (char*)buffer, 1) != 1 || buffer[0] != 1)
+    if(recv_sock_timeout(sock, (char*)buffer, 1, SOCKS_HANDSHAKE_TIMEOUT_MS) != 1 || buffer[0] != 1)
         return false;
     int sz = read_variable_string(sock, buffer, 127);
     if(sz == -1)
         return false;
     buffer[sz] = 0;
     if(strcmp((char*)buffer, USERNAME))
+    {
+        send_auth_response(sock, 1);
         return false;
+    }
     sz = read_variable_string(sock, buffer, 127);
     if(sz == -1)
+    {
+        send_auth_response(sock, 1);
         return false;
+    }
     buffer[sz] = 0;
     if(strcmp((char*)buffer, PASSWORD))
+    {
+        send_auth_response(sock, 1);
         return false;
-    buffer[0] = 1;
-    buffer[1] = 0;
-    return send_sock(sock, (const char*)buffer, 2) == 2;
+    }
+    return send_auth_response(sock, 0);
 }
 
 
@@ -173,23 +236,22 @@ SocksTunnelServer::~SocksTunnelServer() = default;
 
 int SocksTunnelServer::init()
 {
-    // std::cout << "handle_connection" << std::endl;
-    std::cout << "[+] SocksTunnelServer init" << std::endl;   
-
-    // Here we need to split ! 
-    // we are in the TeamServer
-
     MethodIdentificationPacket packet;
-    int read_size = recv_sock(m_serverfd.get(), (char*)&packet, sizeof(MethodIdentificationPacket));
+    int read_size = recv_sock_timeout(m_serverfd.get(), (char*)&packet, sizeof(MethodIdentificationPacket), SOCKS_HANDSHAKE_TIMEOUT_MS);
 
     if(read_size != sizeof(MethodIdentificationPacket) || packet.version != 5)
     {
-        std::cout << "[-] Wrong version of proxychain, only proxychain5 is supported." << std::endl;
         m_serverfd.reset();
         return 0;
     }
 
-    read_size = recv_sock(m_serverfd.get(), &m_internalBuffer[0], packet.nmethods);
+    if(packet.nmethods > m_internalBuffer.size())
+    {
+        m_serverfd.reset();
+        return 0;
+    }
+
+    read_size = recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], packet.nmethods, SOCKS_HANDSHAKE_TIMEOUT_MS);
 
     if(read_size != packet.nmethods)
     {
@@ -208,8 +270,6 @@ int SocksTunnelServer::init()
 
     int write_size = send_sock(m_serverfd.get(), (const char*)&methode_response, sizeof(MethodSelectionPacket)) ;
 
-    // std::cout << "MethodSelectionPacket " << std::to_string(write_size) << std::endl;
-
     if(write_size != sizeof(MethodSelectionPacket) || methode_response.method == static_cast<uint8_t>(Method::NotAvailable))
     {
         m_serverfd.reset();
@@ -224,29 +284,46 @@ int SocksTunnelServer::init()
         }
 
 
-    std::cout << "[+] HandShake ok" << std::endl;   
-
     SOCKS5RequestHeader header;
-    read_size = recv_sock(m_serverfd.get(), (char*)&header, sizeof(SOCKS5RequestHeader));
+    read_size = recv_sock_timeout(m_serverfd.get(), (char*)&header, sizeof(SOCKS5RequestHeader), SOCKS_HANDSHAKE_TIMEOUT_MS);
 
-    if(read_size != sizeof(SOCKS5RequestHeader) || header.version != 5 || header.cmd != static_cast<uint8_t>(Command::Connect) || header.rsv != 0)
+    if(read_size != sizeof(SOCKS5RequestHeader) || header.version != 5 || header.rsv != 0)
     {
+        send_socks_response(m_serverfd.get(), Response::GenError);
         m_serverfd.reset();
         return 0;
     }
 
-    // std::cout << "SOCKS5RequestHeader " << std::to_string(read_size) << std::endl;
+    if(header.cmd != static_cast<uint8_t>(Command::Connect))
+    {
+        send_socks_response(m_serverfd.get(), Response::CommandNotSupported);
+        m_serverfd.reset();
+        return 0;
+    }
 
     if(header.atyp != static_cast<uint8_t>(AddressType::IPv4))
     {
+        if(header.atyp == static_cast<uint8_t>(AddressType::DName))
+        {
+            SOCK5DNameRequestBody body;
+            if(recv_sock_timeout(m_serverfd.get(), (char*)&body, sizeof(SOCK5DNameRequestBody), SOCKS_HANDSHAKE_TIMEOUT_MS) == sizeof(SOCK5DNameRequestBody))
+                recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], body.length, SOCKS_HANDSHAKE_TIMEOUT_MS);
+            uint8_t ignoredPort[2];
+            recv_sock_timeout(m_serverfd.get(), reinterpret_cast<char*>(ignoredPort), sizeof(ignoredPort), SOCKS_HANDSHAKE_TIMEOUT_MS);
+        }
+        else if(header.atyp == static_cast<uint8_t>(AddressType::IPv6))
+        {
+            recv_sock_timeout(m_serverfd.get(), &m_internalBuffer[0], 16, SOCKS_HANDSHAKE_TIMEOUT_MS);
+            uint8_t ignoredPort[2];
+            recv_sock_timeout(m_serverfd.get(), reinterpret_cast<char*>(ignoredPort), sizeof(ignoredPort), SOCKS_HANDSHAKE_TIMEOUT_MS);
+        }
+        send_socks_response(m_serverfd.get(), Response::AddressTypeNotSupported);
         m_serverfd.reset();
         return 0;
     }
 
     SOCK5IP4RequestBody req;
-    read_size = recv_sock(m_serverfd.get(), (char*)&req, sizeof(SOCK5IP4RequestBody));
-
-    // std::cout << "SOCK5IP4RequestBody " << std::to_string(read_size) << std::endl;
+    read_size = recv_sock_timeout(m_serverfd.get(), (char*)&req, sizeof(SOCK5IP4RequestBody), SOCKS_HANDSHAKE_TIMEOUT_MS);
 
     if(read_size != sizeof(SOCK5IP4RequestBody))
     {
@@ -263,10 +340,7 @@ int SocksTunnelServer::init()
 
 int SocksTunnelServer::finishHandshake()
 {
-    SOCKS5Response response;
-    response.ip_src = 0;
-    response.port_src = m_serverPort;
-    send_sock(m_serverfd.get(), (const char*)&response, sizeof(SOCKS5Response));
+    send_socks_response(m_serverfd.get(), Response::Succeeded, static_cast<uint16_t>(m_serverPort));
 
     return 1;
 }
@@ -335,7 +409,6 @@ int SocksServer::createServerSocket(struct sockaddr_in &echoclient)
 
     if ((serversock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0) 
     {
-        std::cout << "[-] Could not create socket.\n";
         return -1;
     }
 
@@ -343,7 +416,6 @@ int SocksServer::createServerSocket(struct sockaddr_in &echoclient)
     int opt = 1;
     if (setsockopt(serversock, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt)) < 0) 
     {
-        std::cout << "[-] Could not set socket option.\n";
         #ifdef __linux__
             close(serversock);
         #elif _WIN32
@@ -366,7 +438,6 @@ int SocksServer::createServerSocket(struct sockaddr_in &echoclient)
         #elif _WIN32
             closesocket(serversock);
         #endif
-        std::cout << "[-] Bind error.\n";
         return -1;
     }
 
@@ -378,7 +449,6 @@ int SocksServer::createServerSocket(struct sockaddr_in &echoclient)
         #elif _WIN32
             closesocket(serversock);
         #endif
-        std::cout << "[-] Listen error.\n";
         return -1;
     }
     return serversock;
@@ -392,7 +462,6 @@ int SocksServer::handleConnection()
 
     if(m_listen_sock.get() == -1)
     {
-        std::cout << "[-] Failed to create server\n";
         return -1;
     }
 
@@ -424,9 +493,6 @@ int SocksServer::handleConnection()
             idSocksTunnelServer++;
         }
     }
-
-    std::cout << "[+] handleConnection stoped\n";
-
     m_listen_sock.reset();
 
     return 1;
